@@ -24,10 +24,10 @@ def load_api_key():
 
 
 def analyze_candidates(matches):
-    """Return validated Sarvam analyses; return None when no key or request fails."""
+    """Return (validated analyses, safe error message). Never expose provider secrets."""
     key = load_api_key()
     if not key:
-        return None
+        return None, "No SARVAM_API_KEY is configured."
 
     public_pairs = []
     for match in matches:
@@ -74,7 +74,7 @@ def analyze_candidates(matches):
     try:
         from sarvamai import SarvamAI
 
-        client = SarvamAI(api_subscription_key=key)
+        client = SarvamAI(api_subscription_key=key, timeout=45)
         response = client.chat.completions(
             model="sarvam-105b",
             messages=[{"role": "user", "content": prompt}],
@@ -104,7 +104,18 @@ def analyze_candidates(matches):
                 "uncertain_details": clean_list(item.get("uncertain_details")),
                 "verification_prompts": clean_list(item.get("verification_prompts")),
             }
-        return validated
-    except Exception:
-        # Keep the demo usable without surfacing provider details or secrets.
-        return None
+        return validated, None
+    except Exception as exc:
+        # Give actionable status without printing request details or secrets.
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            message = "Sarvam rejected the API key. Check that the key is valid and active."
+        elif status == 429:
+            message = "Sarvam rate limit or credit limit reached. Try again later or check your account."
+        elif status and status >= 500:
+            message = "Sarvam is temporarily unavailable. Try again shortly."
+        else:
+            message = "Sarvam request failed. Check network access and model availability."
+        return None, message

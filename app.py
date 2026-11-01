@@ -156,26 +156,52 @@ elif page == "Report an item":
 
 elif page == "Smart matching":
     st.subheader("Smart matching")
-    st.write("Deterministic attribute scoring ranks candidate pairs. Sarvam can add semantic explanations when a key is configured.")
+    st.write("Sarvam compares every Lost report with every Found report to find semantic matches. Deterministic attribute scoring remains available as a fallback.")
     st.caption("Scores are leads, not confirmation. No private verification detail is sent to the AI or shown on public cards.")
-    if st.button("Analyze top candidates with Sarvam", type="primary", disabled=not bool(all_matches)):
+    if st.button("Find matches with Sarvam", type="primary", disabled=not any(r.get("kind") == "Lost" for r in reports) or not any(r.get("kind") == "Found" for r in reports)):
         if not load_api_key():
-            st.info("Sarvam is not configured yet. Showing deterministic fallback matches.")
+            st.info("Sarvam key is not configured. Add SARVAM_API_KEY=your_new_key to the project .env file, then click again. Deterministic matches are still shown below.")
         else:
-            analyses = analyze_candidates(all_matches[:5])
-            if analyses is None:
-                st.warning("Sarvam is unavailable right now. Showing deterministic fallback matches.")
+            # Include low-scoring pairs too: Sarvam may recognize equivalent
+            # descriptions even when the deterministic lexical score is low.
+            candidates = find_matches(reports, minimum_score=0)
+            analyses, error = analyze_candidates(candidates)
+            if error:
+                st.warning(f"{error} Showing deterministic fallback matches.")
             else:
                 st.session_state["ai_analyses"] = analyses
-                st.success("Candidate explanations updated.")
+                st.success(f"Sarvam checked {len(candidates)} Lost/Found pairs and updated the match suggestions.")
     if not all_matches:
-        st.info("There are no lost/found pairs to compare yet.")
-    for index, match in enumerate(all_matches[:12]):
+        if not st.session_state["ai_analyses"]:
+            st.info("There are no lost/found pairs to compare yet.")
+    # Add AI-discovered pairs that fell below the deterministic matcher cutoff.
+    known_pair_ids = {match["pair_id"] for match in all_matches}
+    ai_only_matches = []
+    ai_only_pair_ids = set()
+    if st.session_state["ai_analyses"]:
+        from matching import score_pair
+        reports_by_id = {report["id"]: report for report in reports}
+        for pair_id, analysis in st.session_state["ai_analyses"].items():
+            if pair_id in known_pair_ids or analysis.get("match_likelihood", 0) < 45:
+                continue
+            lost_id, found_id = pair_id.split("|", 1)
+            lost, found = reports_by_id.get(lost_id), reports_by_id.get(found_id)
+            if lost and found:
+                ai_only_matches.append({"pair_id": pair_id, "lost": lost, "found": found, **score_pair(lost, found)})
+                ai_only_pair_ids.add(pair_id)
+    display_matches = all_matches + ai_only_matches
+    display_matches.sort(key=lambda match: max(match["score"], st.session_state["ai_analyses"].get(match["pair_id"], {}).get("match_likelihood", 0)), reverse=True)
+    if st.session_state["ai_analyses"] and not ai_only_matches and not all_matches:
+        st.info("Sarvam did not find any likely pairs. Submit more details or reports to compare.")
+    for index, match in enumerate(display_matches[:12]):
         lost, found = match["lost"], match["found"]
         analysis = st.session_state["ai_analyses"].get(match["pair_id"])
         score = match["score"]
         if analysis:
-            score = round(0.7 * score + 0.3 * analysis["match_likelihood"])
+            if match["pair_id"] in ai_only_pair_ids:
+                score = analysis["match_likelihood"]
+            else:
+                score = round(0.7 * score + 0.3 * analysis["match_likelihood"])
         if match["conflicts"]:
             score = min(score, 39)
         label = "Possible match" if score >= 55 else "Needs review"
@@ -183,7 +209,8 @@ elif page == "Smart matching":
             left, right = st.columns([4, 1])
             with left:
                 st.markdown(f"### {lost['name']} ↔ {found['name']}")
-                st.caption(f"{label} · {score}% · Not verified")
+                source = "Sarvam match" if match["pair_id"] in ai_only_pair_ids else ("Sarvam + attribute score" if analysis else "Attribute score")
+                st.caption(f"{label} · {score}% · {source} · Not verified")
                 st.write(f"**Lost:** {lost['description']}")
                 st.write(f"**Found:** {found['description']}")
                 sig = match["signals"]
