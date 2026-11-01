@@ -41,6 +41,41 @@ def _go_to_report(kind):
     st.session_state["page"] = "Report an item"
 
 
+def _submit_report():
+    state = st.session_state
+    name = str(state.get("report_name", "")).strip()
+    description = str(state.get("report_description", "")).strip()
+    location = str(state.get("report_location", "")).strip()
+    if not name or not description or not location:
+        state["report_error"] = "Please fill in the item name, public description, and campus location."
+        return
+
+    report_id = "user-" + datetime.now().strftime("%Y%m%d%H%M%S%f")
+    uploaded = state.get("report_image")
+    report = {
+        "id": report_id,
+        "kind": state.get("form_report_kind", "Lost"),
+        "name": name,
+        "description": description,
+        "category": state.get("report_category", "Other"),
+        "color": str(state.get("report_color", "")).strip(),
+        "location": location,
+        "reported_at": datetime.combine(state["report_date"], state["report_time"]).isoformat(timespec="minutes"),
+        "private_detail": str(state.get("report_private_detail", "")).strip(),
+        "created_by": "user",
+        "image": uploaded.getvalue() if uploaded else None,
+    }
+    state["reports"].append(report)
+    state["my_report_ids"].append(report_id)
+    state["latest_submitted_report_id"] = report_id
+    state["ai_analyses"] = {}
+    state["report_error"] = ""
+
+    state["pending_match_report_id"] = report_id
+    state["latest_report_status"] = "Report saved. Checking for possible matches…"
+    state["page"] = "Smart matching"
+
+
 def _init_state():
     if "reports" not in st.session_state:
         st.session_state["reports"] = copy.deepcopy(SAMPLE_REPORTS)
@@ -48,6 +83,10 @@ def _init_state():
     st.session_state.setdefault("report_kind", "Lost")
     st.session_state.setdefault("contact_requests", [])
     st.session_state.setdefault("ai_analyses", {})
+    st.session_state.setdefault("latest_submitted_report_id", None)
+    st.session_state.setdefault("latest_report_status", "")
+    st.session_state.setdefault("report_error", "")
+    st.session_state.setdefault("pending_match_report_id", None)
 
 
 def _public_report(report):
@@ -100,6 +139,24 @@ potential_count = sum(1 for match in all_matches if match["score"] >= 45)
 st.title("LOSTLINK")
 st.markdown('<p class="lostlink-subtitle">Lost something? Let AI find it.</p>', unsafe_allow_html=True)
 
+if page == "Smart matching" and st.session_state["pending_match_report_id"]:
+    report_id = st.session_state["pending_match_report_id"]
+    st.session_state["pending_match_report_id"] = None
+    candidates = find_matches(reports, minimum_score=0)
+    related = [pair for pair in candidates if report_id in pair["pair_id"].split("|")]
+    if not related:
+        st.session_state["latest_report_status"] = "Report saved. There is no Lost/Found report of the opposite type to compare yet."
+    elif load_api_key():
+        with st.spinner("Checking this report against existing reports…"):
+            analyses, error = analyze_candidates(candidates)
+        if error:
+            st.session_state["latest_report_status"] = f"Report saved. {error} Showing deterministic matches."
+        else:
+            st.session_state["ai_analyses"] = analyses
+            st.session_state["latest_report_status"] = f"Report saved. Sarvam checked {len(related)} related Lost/Found pair(s); review the suggestions below."
+    else:
+        st.session_state["latest_report_status"] = "Report saved. Sarvam is not configured, so deterministic matching is shown below."
+
 if page == "Dashboard":
     m1, m2, m3 = st.columns(3)
     m1.metric("Lost reports", lost_count)
@@ -124,40 +181,28 @@ elif page == "Report an item":
     st.subheader("Report an item")
     st.write("Share enough public detail to help find a match. Keep serial numbers and unique identifying details in the private field.")
     with st.form("report_form", clear_on_submit=True):
-        kind = st.radio("Report type", ["Lost", "Found"], horizontal=True, key="report_kind")
-        name = st.text_input("Item name *", placeholder="e.g. wireless earbuds")
-        description = st.text_area("Public description *", placeholder="Describe the item without sharing secret identifiers")
+        st.radio("Report type", ["Lost", "Found"], horizontal=True, key="form_report_kind")
+        st.text_input("Item name *", placeholder="e.g. wireless earbuds", key="report_name")
+        st.text_area("Public description *", placeholder="Describe the item without sharing secret identifiers", key="report_description")
         c1, c2 = st.columns(2)
-        category = c1.selectbox("Category *", CATEGORIES)
-        color = c2.text_input("Colour", placeholder="e.g. black")
+        c1.selectbox("Category *", CATEGORIES, key="report_category")
+        c2.text_input("Colour", placeholder="e.g. black", key="report_color")
         c3, c4 = st.columns(2)
-        location = c3.text_input("Campus location *", placeholder="e.g. central library")
-        event_date = c4.date_input("Approximate date")
-        event_time = st.time_input("Approximate time")
-        private_detail = st.text_area("Private identifying detail (never shown publicly)", placeholder="A mark or detail only the owner/finder should know")
-        uploaded = st.file_uploader("Optional photo", type=["png", "jpg", "jpeg", "webp"])
-        submitted = st.form_submit_button("Submit report", type="primary", use_container_width=True)
-    if submitted:
-        if not name.strip() or not description.strip() or not location.strip():
-            st.error("Please fill in the item name, public description, and campus location.")
-        else:
-            report_id = "user-" + datetime.now().strftime("%Y%m%d%H%M%S%f")
-            image_bytes = uploaded.getvalue() if uploaded else None
-            report = {
-                "id": report_id, "kind": kind, "name": name.strip(), "description": description.strip(),
-                "category": category, "color": color.strip(), "location": location.strip(),
-                "reported_at": datetime.combine(event_date, event_time).isoformat(timespec="minutes"),
-                "private_detail": private_detail.strip(), "created_by": "user", "image": image_bytes,
-            }
-            st.session_state["reports"].append(report)
-            st.session_state["my_report_ids"].append(report_id)
-            st.success("Report added for this session. It is not stored permanently.")
-            st.rerun()
+        c3.text_input("Campus location *", placeholder="e.g. central library", key="report_location")
+        c4.date_input("Approximate date", key="report_date")
+        st.time_input("Approximate time", key="report_time")
+        st.text_area("Private identifying detail (never shown publicly)", placeholder="A mark or detail only the owner/finder should know", key="report_private_detail")
+        st.file_uploader("Optional photo", type=["png", "jpg", "jpeg", "webp"], key="report_image")
+        st.form_submit_button("Submit report", type="primary", use_container_width=True, on_click=_submit_report)
+    if st.session_state["report_error"]:
+        st.error(st.session_state["report_error"])
 
 elif page == "Smart matching":
     st.subheader("Smart matching")
     st.write("Sarvam compares every Lost report with every Found report to find semantic matches. Deterministic attribute scoring remains available as a fallback.")
     st.caption("Scores are leads, not confirmation. No private verification detail is sent to the AI or shown on public cards.")
+    if st.session_state["latest_report_status"]:
+        st.info(st.session_state["latest_report_status"])
     if st.button("Find matches with Sarvam", type="primary", disabled=not any(r.get("kind") == "Lost" for r in reports) or not any(r.get("kind") == "Found" for r in reports)):
         if not load_api_key():
             st.info("Sarvam key is not configured. Add SARVAM_API_KEY=your_new_key to the project .env file, then click again. Deterministic matches are still shown below.")
@@ -191,6 +236,13 @@ elif page == "Smart matching":
                 ai_only_pair_ids.add(pair_id)
     display_matches = all_matches + ai_only_matches
     display_matches.sort(key=lambda match: max(match["score"], st.session_state["ai_analyses"].get(match["pair_id"], {}).get("match_likelihood", 0)), reverse=True)
+    latest_report_id = st.session_state["latest_submitted_report_id"]
+    if latest_report_id and st.session_state["latest_report_status"]:
+        related_display = [match for match in display_matches if latest_report_id in match["pair_id"].split("|")]
+        if related_display:
+            st.success(f"Found {len(related_display)} possible match(es) for your latest report. Review them below; none is verified.")
+        elif any(latest_report_id in pair["pair_id"].split("|") for pair in find_matches(reports, minimum_score=0)):
+            st.info("No likely match found for this report yet. It is saved for this session; another report may match it later.")
     if st.session_state["ai_analyses"] and not ai_only_matches and not all_matches:
         st.info("Sarvam did not find any likely pairs. Submit more details or reports to compare.")
     for index, match in enumerate(display_matches[:12]):
