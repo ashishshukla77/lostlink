@@ -1,0 +1,8 @@
+﻿.env
+.venv/
+.runtime/
+.packages/
+.uv-cache/
+__pycache__/
+.streamlit/secrets.toml
+work/
